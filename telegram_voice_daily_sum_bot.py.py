@@ -61,6 +61,7 @@ for easy extraction.
 """
 from __future__ import annotations
 
+import datetime
 import os
 import sqlite3
 import logging
@@ -79,6 +80,7 @@ from dotenv import load_dotenv
 from vosk import Model, KaldiRecognizer
 from telegram import Update, Voice, constants
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import CommandHandler
 
 try:
     import openai  # optional – only needed when USE_LOCAL_LLM == False
@@ -94,7 +96,7 @@ class Utils:
     @staticmethod
     def now_utc() -> str:
         """Return current UTC time in ISO‑8601 format (without microseconds)."""
-        return _dt.datetime.utcnow().replace(microsecond=0).isoformat()
+        return datetime.datetime.now().replace(microsecond=0).isoformat()
 
     @staticmethod
     def ensure_parent(path: Path):
@@ -167,7 +169,8 @@ class Database:
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(telegram_file_id) DO UPDATE SET
                 text=excluded.text,
-                summarized=excluded.summarized;
+                summarized=excluded.summarized,
+                sent_at=excluded.sent_at;
             """,
             (telegram_file_id, text, summary, sent_at, user_id, username),
         )
@@ -178,6 +181,22 @@ class Database:
     def fetch_last_n(self, n: int = 10):
         cur = self.conn.execute(
             "SELECT * FROM voice_messages ORDER BY id DESC LIMIT ?", (n,)
+        )
+        return cur.fetchall()
+
+    def fetch_summaries_by_date(self, date_str: str) -> list[tuple[str, str, str]]:
+        """
+        Возвращает список кортежей (sent_at, username, summarized)
+        для записей, у которых sent_at начинается с date_str (YYYY-MM-DD).
+        """
+        cur = self.conn.execute(
+            """
+            SELECT sent_at, telegram_file_id, summarized
+              FROM voice_messages
+             WHERE sent_at LIKE ?
+          ORDER BY sent_at ASC
+            """,
+            (f"{date_str}%",)
         )
         return cur.fetchall()
 
@@ -359,6 +378,7 @@ class TelegramBot:
         self.app.add_handler(
             MessageHandler(filters.VOICE & ~filters.COMMAND, self.on_voice)
         )
+        self.app.add_handler(CommandHandler("sum", self.on_summary))
         logging.info("Telegram bot initialized – waiting for voice messages…")
 
     # ---------------------------------------------------------------------
@@ -377,6 +397,7 @@ class TelegramBot:
         # 1️⃣ Transcribe
         text = self.stt.transcribe_ogg_bytes(ogg_bytes)
         logging.info("Transcribed %d chars", len(text))
+        logging.info(f"Text: {text}")
 
         # 2️⃣ Summarize
         summary = self.llm.summarize(text)
@@ -393,8 +414,40 @@ class TelegramBot:
 
         # 4️⃣ Respond with summary
         await update.message.reply_text(
-            f"📌 Резюме: {summary}", parse_mode=constants.ParseMode.HTML
+            f"#{file_id} \n📌 Резюме: {summary}", parse_mode=constants.ParseMode.HTML,
+            reply_to_message_id=update.effective_message.message_id
         )
+
+    async def on_summary(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        text = update.effective_message.text.strip()
+        parts = text.split(maxsplit=1)
+
+        # Разбираем дату из аргумента или берём сегоднящее число в Warsaw
+        if len(parts) > 1:
+            date_str = parts[1]
+            try:
+                datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                await update.message.reply_text("❗️Неверный формат даты. Используйте YYYY-MM-DD")
+                return
+        else:
+            # Europe/Warsaw = UTC+2
+            tz = datetime.timezone(datetime.timedelta(hours=2))
+            date_str = datetime.datetime.now(tz).date().isoformat()
+
+        # Получаем из БД
+        summaries = self.db.fetch_summaries_by_date(date_str)
+        if not summaries:
+            await update.message.reply_text(f"ℹ️ Нет резюме за {date_str}.")
+            return
+
+        # Формируем и шлём
+        lines = []
+        for sent_at, telegram_file_id, summary in summaries:
+            lines.append(f"{sent_at} — #{telegram_file_id}: {summary}")
+
+        # Если очень много строк, можно разбить на части
+        await update.message.reply_text("\n".join(lines))
 
     # ---------------------------------------------------------------------
     def run(self):

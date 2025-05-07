@@ -2,3 +2,4 @@
 *.log
 *.db
 *.idea
+models/vosk-model-ru-0.42
