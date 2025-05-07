@@ -33,7 +33,6 @@ OPENAI_MODEL="gpt‑3.5‑turbo"  # or gpt‑4o, etc.
 
 # ─── Speech‑to‑Text ──────────────────────────────────────────────────────────────
 VOSK_MODEL_PATH="models/vosk‑small‑ru‑0.22"
-FFMPEG_BINARY="ffmpeg"         # Path or command alias
 
 # ─── Misc ────────────────────────────────────────────────────────────────────────
 LOG_FILE="bot.log"             # Where to write debug logs
@@ -277,11 +276,10 @@ class SpeechToText:
     """
     SAMPLE_RATE = 16_000  # удобная константа
 
-    def __init__(self, model_path: str, ffmpeg_cmd: str = "ffmpeg"):
+    def __init__(self, model_path: str):
         if not Path(model_path).exists():
             raise FileNotFoundError(f"Vosk model not found: {model_path}")
         self.model = Model(model_path)
-        self.ffmpeg_cmd = ffmpeg_cmd
         logging.info("Loaded Vosk model from %s", model_path)
 
     # ---------------------------------------------------------------------
@@ -416,10 +414,7 @@ def main():
     # Instantiate sub‑systems using env‑config.
     db = Database(os.getenv("DB_PATH", "bot.db"))
 
-    stt = SpeechToText(
-        model_path=os.getenv("VOSK_MODEL_PATH", "models/vosk‑small‑ru‑0.22"),
-        ffmpeg_cmd=os.getenv("FFMPEG_BINARY", "ffmpeg"),
-    )
+    stt = SpeechToText(model_path=os.getenv("VOSK_MODEL_PATH", "models/vosk‑small‑ru‑0.22"))
 
     llm = LLMHandler(
         use_local=Utils.as_bool(os.getenv("USE_LOCAL_LLM", "True")),
