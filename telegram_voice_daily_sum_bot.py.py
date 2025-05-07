@@ -67,7 +67,9 @@ import sqlite3
 import logging
 import datetime as _dt
 import json
-import subprocess
+
+import resampy
+import soundfile as sf
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,6 +146,7 @@ class Database:
         Utils.ensure_parent(Path(path))
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL;")  # better concurrency
+        self.conn.execute("PRAGMA busy_timeout = 10000;")
         self.conn.execute(self._CREATE_TABLE_SQL)
         self.conn.commit()
         logging.info("Connected to SQLite DB at %s", path)
@@ -301,18 +304,24 @@ class SpeechToText:
     #  INTERNAL HELPERS
     # ---------------------------------------------------------------------
     def _ogg_to_wav(self, ogg_path: Path, wav_path: Path) -> None:
-        """Конвертируем Ogg/Opus → WAV 16 kHz mono s16le."""
-        cmd = [
-            self.ffmpeg_cmd,  # берётся из env‑переменной FFMPEG_BINARY
-            "-i", str(ogg_path),
-            "-ar", str(self.SAMPLE_RATE),  # частота дискретизации
-            "-ac", "1",  # mono
-            "-c:a", "pcm_s16le",  # несжатый PCM
-            "-y",  # overwrite
-            "-loglevel", "quiet",  # тишина в логи FFmpeg
-            str(wav_path),
-        ]
-        subprocess.run(cmd, check=True)
+        """
+            Конвертирует Ogg/Opus → WAV 16 kHz mono PCM 16-bit
+            с помощью soundfile (libsndfile) и resampy.
+            Требует, чтобы libsndfile была скомпилирована с поддержкой Ogg/Opus.
+            """
+        # 1. Читаем аудио (может быть стерео)
+        data, sr = sf.read(str(ogg_path))  # data: np.ndarray, sr: исходная частота
+
+        # 2. Приводим к моно, усредняя каналы
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+
+        # 3. Ресемплируем, если исходная частота != 16 kHz
+        if sr != self.SAMPLE_RATE:
+            data = resampy.resample(data, sr, self.SAMPLE_RATE)
+
+        # 4. Записываем WAV с PCM 16-bit
+        sf.write(str(wav_path), data, self.SAMPLE_RATE, subtype='PCM_16')
 
     def _wav_to_text(self, wav_path: Path) -> str:
         """Читает WAV и возвращает финальный текст Vosk."""
